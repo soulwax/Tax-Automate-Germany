@@ -1,4 +1,4 @@
-"""Data models and metadata parser for Tax-Automate-Germany."""
+"""Data models, parsing, and validation for Tax-Automate-Germany."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 DAY_MAP = {
     "montag": 0, "dienstag": 1, "mittwoch": 2, "donnerstag": 3,
@@ -26,6 +27,18 @@ LAND_CODES = {
     "rp": "RP", "sl": "SL", "sn": "SN", "st": "ST", "sh": "SH", "th": "TH",
 }
 
+VACATION_KEYS = (
+    "Urlaubsdaten",
+    "Urlaubstage_Liste",
+    "Urlaubstage-Liste",
+)
+
+EXPENSE_KEYS = (
+    "Werbungskosten",
+    "Zusätzliche_Werbungskosten",
+    "Weitere_Werbungskosten",
+)
+
 
 @dataclass
 class PersonalData:
@@ -44,8 +57,17 @@ class PersonalData:
 
 
 @dataclass
+class AdditionalExpense:
+    category: str
+    amount: float
+    description: str = ""
+    note: str = ""
+
+
+@dataclass
 class PeriodConfig:
     """One contiguous work period within a year (may span full year or a sub-range)."""
+
     start_date: datetime.date
     end_date: datetime.date
     bundesland: str = "Hessen"
@@ -59,6 +81,7 @@ class PeriodConfig:
     km: float = 0.0
     map_file: str = ""
     kommentar: str = ""
+    vacation_dates: set[datetime.date] = field(default_factory=set)
 
     @property
     def label(self) -> str:
@@ -73,6 +96,8 @@ class YearConfig:
     year: int
     periods: list[PeriodConfig] = field(default_factory=list)
     total_urlaub: int = 0
+    explicit_urlaub_dates: set[datetime.date] = field(default_factory=set)
+    additional_expenses: list[AdditionalExpense] = field(default_factory=list)
 
     @property
     def bundesland(self) -> str:
@@ -81,6 +106,14 @@ class YearConfig:
     @property
     def land_code(self) -> str:
         return self.periods[0].land_code if self.periods else "HE"
+
+    @property
+    def uses_multiple_states(self) -> bool:
+        return len({p.land_code for p in self.periods}) > 1
+
+    @property
+    def has_explicit_urlaub(self) -> bool:
+        return bool(self.explicit_urlaub_dates)
 
     def period_for_date(self, d: datetime.date) -> PeriodConfig:
         for p in self.periods:
@@ -95,12 +128,24 @@ class YearConfig:
         return len(self.periods) - 1
 
 
-# ---------------------------------------------------------------------------
-# Parsers
-# ---------------------------------------------------------------------------
+@dataclass
+class ValidationIssue:
+    level: str
+    message: str
+    year: int | None = None
+
+    def render(self) -> str:
+        prefix = f"{self.level}: "
+        if self.year is None:
+            return prefix + self.message
+        return prefix + f"Jahr {self.year}: {self.message}"
+
+
 def parse_date(s: str) -> datetime.date:
     """Parse DD.MM.YYYY format."""
     parts = s.strip().split(".")
+    if len(parts) != 3 or not all(parts):
+        raise ValueError(f"Ungueltiges Datum: {s!r}")
     return datetime.date(int(parts[2]), int(parts[1]), int(parts[0]))
 
 
@@ -123,6 +168,13 @@ def parse_km(t: str) -> float:
     return float(m.group(1).replace(",", ".")) if m else 0.0
 
 
+def parse_amount(value: Any) -> float:
+    m = re.search(r"(-?\d+(?:[.,]\d+)?)", str(value))
+    if not m:
+        raise ValueError(f"Kein Betrag gefunden: {value!r}")
+    return float(m.group(1).replace(",", "."))
+
+
 def _resolve_km(cfg: dict) -> float:
     """Try multiple possible km field names for backwards compat."""
     for key in ("Kilometer_Entfernung", "Kilometer_entfernung",
@@ -131,6 +183,106 @@ def _resolve_km(cfg: dict) -> float:
         if key in cfg:
             return parse_km(cfg[key])
     return 0.0
+
+
+def _iter_entries(value: Any) -> list[Any]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, tuple):
+        return list(value)
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return []
+        return [part.strip() for part in text.split(",") if part.strip()]
+    return [value]
+
+
+def _expand_date_entry(entry: str) -> set[datetime.date]:
+    text = str(entry).strip()
+    if not text:
+        return set()
+
+    for sep in (" bis ", " - ", " – ", " — "):
+        if sep in text:
+            start_raw, end_raw = text.split(sep, 1)
+            start = parse_date(start_raw)
+            end = parse_date(end_raw)
+            if end < start:
+                raise ValueError(f"Urlaubszeitraum endet vor dem Beginn: {text!r}")
+            days = set()
+            current = start
+            while current <= end:
+                days.add(current)
+                current += datetime.timedelta(days=1)
+            return days
+
+    return {parse_date(text)}
+
+
+def parse_vacation_dates(value: Any) -> set[datetime.date]:
+    dates: set[datetime.date] = set()
+    for entry in _iter_entries(value):
+        if isinstance(entry, str):
+            dates.update(_expand_date_entry(entry))
+        else:
+            raise ValueError(f"Urlaubsdaten muessen als Text angegeben werden: {entry!r}")
+    return dates
+
+
+def _parse_expense_entry(entry: Any) -> list[AdditionalExpense]:
+    if isinstance(entry, dict):
+        if "Kategorie" in entry or "Betrag" in entry or "Beschreibung" in entry:
+            amount = parse_amount(entry.get("Betrag", 0))
+            return [AdditionalExpense(
+                category=str(entry.get("Kategorie", "Sonstige Werbungskosten")).strip()
+                or "Sonstige Werbungskosten",
+                amount=amount,
+                description=str(entry.get("Beschreibung", "")).strip(),
+                note=str(entry.get("Hinweis", "")).strip(),
+            )]
+
+        items = []
+        for category, raw_amount in entry.items():
+            items.append(AdditionalExpense(
+                category=str(category).strip() or "Sonstige Werbungskosten",
+                amount=parse_amount(raw_amount),
+            ))
+        return items
+
+    raise ValueError(f"Ungueltiger Werbungskosten-Eintrag: {entry!r}")
+
+
+def parse_additional_expenses(value: Any) -> list[AdditionalExpense]:
+    expenses: list[AdditionalExpense] = []
+    for entry in _iter_entries(value):
+        expenses.extend(_parse_expense_entry(entry))
+    return expenses
+
+
+def _collect_period_vacations(cfg: dict) -> set[datetime.date]:
+    for key in VACATION_KEYS:
+        if key in cfg:
+            return parse_vacation_dates(cfg[key])
+    return set()
+
+
+def _collect_year_expenses(data: dict, year_str: str, configs: list[dict]) -> list[AdditionalExpense]:
+    expenses: list[AdditionalExpense] = []
+
+    for key in EXPENSE_KEYS:
+        section = data.get(key)
+        if isinstance(section, dict) and year_str in section:
+            expenses.extend(parse_additional_expenses(section[year_str]))
+
+    for cfg in configs:
+        for key in EXPENSE_KEYS:
+            if key in cfg:
+                expenses.extend(parse_additional_expenses(cfg[key]))
+
+    return expenses
 
 
 def load_metadata(path: str | Path) -> tuple[PersonalData, list[YearConfig]]:
@@ -155,18 +307,16 @@ def load_metadata(path: str | Path) -> tuple[PersonalData, list[YearConfig]]:
         jan1 = datetime.date(year, 1, 1)
         dec31 = datetime.date(year, 12, 31)
 
-        # Get total vacation from first config
         total_urlaub = int(configs[0].get("Urlaubstage", "0"))
 
         periods = []
+        explicit_urlaub_dates: set[datetime.date] = set()
         for i, cfg in enumerate(configs):
-            # Determine period boundaries
             if "Ab" in cfg:
                 start = parse_date(cfg["Ab"])
             elif i == 0:
                 start = jan1
             else:
-                # starts day after previous period ends
                 start = periods[-1].end_date + datetime.timedelta(1)
 
             if "Bis" in cfg:
@@ -174,12 +324,12 @@ def load_metadata(path: str | Path) -> tuple[PersonalData, list[YearConfig]]:
             elif i == len(configs) - 1:
                 end = dec31
             else:
-                # Will be determined when next period is parsed
-                # For now use dec31, will be adjusted
                 end = dec31
 
             bundesland = cfg.get("Feiertage", "Hessen")
             lc = LAND_CODES.get(bundesland.lower(), "HE")
+            vacation_dates = _collect_period_vacations(cfg)
+            explicit_urlaub_dates.update(vacation_dates)
 
             periods.append(PeriodConfig(
                 start_date=start,
@@ -195,9 +345,9 @@ def load_metadata(path: str | Path) -> tuple[PersonalData, list[YearConfig]]:
                 km=_resolve_km(cfg),
                 map_file=cfg.get("Kartendatei", ""),
                 kommentar=cfg.get("Kommentar", ""),
+                vacation_dates=vacation_dates,
             ))
 
-        # Fix period boundaries: ensure contiguous and no overlap
         for i in range(len(periods) - 1):
             if "Bis" not in configs[i]:
                 periods[i].end_date = periods[i + 1].start_date - datetime.timedelta(1)
@@ -206,6 +356,129 @@ def load_metadata(path: str | Path) -> tuple[PersonalData, list[YearConfig]]:
             year=year,
             periods=periods,
             total_urlaub=total_urlaub,
+            explicit_urlaub_dates=explicit_urlaub_dates,
+            additional_expenses=_collect_year_expenses(data, year_str, configs),
         ))
 
     return personal, year_configs
+
+
+def validate_metadata(year_configs: list[YearConfig]) -> list[ValidationIssue]:
+    issues: list[ValidationIssue] = []
+
+    if not year_configs:
+        issues.append(ValidationIssue("ERROR", "Keine Jahreskonfiguration gefunden."))
+        return issues
+
+    for yc in year_configs:
+        if not yc.periods:
+            issues.append(ValidationIssue("ERROR", "Keine Zeitraeume konfiguriert.", yc.year))
+            continue
+
+        previous_end: datetime.date | None = None
+        configured_explicit = 0
+        usable_explicit = 0
+
+        for period in yc.periods:
+            if period.start_date.year != yc.year or period.end_date.year != yc.year:
+                issues.append(ValidationIssue(
+                    "ERROR",
+                    f"Zeitraum {period.label} liegt nicht vollstaendig im Steuerjahr.",
+                    yc.year,
+                ))
+            if period.end_date < period.start_date:
+                issues.append(ValidationIssue(
+                    "ERROR",
+                    f"Zeitraum {period.label} endet vor dem Beginn.",
+                    yc.year,
+                ))
+            if previous_end and period.start_date <= previous_end:
+                issues.append(ValidationIssue(
+                    "ERROR",
+                    f"Zeitraum {period.label} ueberschneidet sich mit dem vorherigen Zeitraum.",
+                    yc.year,
+                ))
+            previous_end = period.end_date
+
+            if not period.workdays:
+                issues.append(ValidationIssue(
+                    "WARN",
+                    f"Zeitraum {period.label} hat keine Arbeitstage konfiguriert.",
+                    yc.year,
+                ))
+
+            if period.km < 0:
+                issues.append(ValidationIssue(
+                    "ERROR",
+                    f"Zeitraum {period.label} hat eine negative Kilometerangabe.",
+                    yc.year,
+                ))
+
+            configured_explicit += len(period.vacation_dates)
+            for vacation_date in sorted(period.vacation_dates):
+                if vacation_date.year != yc.year:
+                    issues.append(ValidationIssue(
+                        "ERROR",
+                        f"Urlaubsdatum {vacation_date:%d.%m.%Y} liegt ausserhalb des Steuerjahrs.",
+                        yc.year,
+                    ))
+                    continue
+
+                if not (period.start_date <= vacation_date <= period.end_date):
+                    issues.append(ValidationIssue(
+                        "ERROR",
+                        f"Urlaubsdatum {vacation_date:%d.%m.%Y} liegt ausserhalb des Zeitraums {period.label}.",
+                        yc.year,
+                    ))
+                    continue
+
+                if vacation_date.weekday() not in period.workdays:
+                    issues.append(ValidationIssue(
+                        "WARN",
+                        f"Urlaubsdatum {vacation_date:%d.%m.%Y} faellt auf einen arbeitsfreien Tag.",
+                        yc.year,
+                    ))
+                else:
+                    usable_explicit += 1
+
+        if yc.has_explicit_urlaub:
+            if usable_explicit < yc.total_urlaub:
+                issues.append(ValidationIssue(
+                    "WARN",
+                    f"Es sind nur {usable_explicit} nutzbare Urlaubstage dokumentiert, aber {yc.total_urlaub} angegeben.",
+                    yc.year,
+                ))
+            if usable_explicit > yc.total_urlaub:
+                issues.append(ValidationIssue(
+                    "WARN",
+                    f"Es sind {usable_explicit} nutzbare Urlaubstage dokumentiert, aber nur {yc.total_urlaub} angegeben.",
+                    yc.year,
+                ))
+            if configured_explicit != len(yc.explicit_urlaub_dates):
+                issues.append(ValidationIssue(
+                    "WARN",
+                    "Mindestens ein Urlaubsdatum ist in mehreren Zeitraeumen doppelt hinterlegt.",
+                    yc.year,
+                ))
+        elif yc.total_urlaub > 0:
+            issues.append(ValidationIssue(
+                "WARN",
+                "Es sind nur Urlaubstage als Anzahl hinterlegt; ohne konkrete Urlaubsdaten bleibt die Doku heuristisch.",
+                yc.year,
+            ))
+
+        for expense in yc.additional_expenses:
+            if expense.amount < 0:
+                issues.append(ValidationIssue(
+                    "ERROR",
+                    f"Werbungskosten-Posten {expense.category!r} hat einen negativen Betrag.",
+                    yc.year,
+                ))
+            if not expense.category:
+                issues.append(ValidationIssue(
+                    "WARN",
+                    "Ein Werbungskosten-Posten hat keine Kategorie.",
+                    yc.year,
+                ))
+
+    return issues

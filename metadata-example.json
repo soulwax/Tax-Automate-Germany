@@ -13,6 +13,20 @@
     "Umzugsdatum_Arbeitgeber": "01.01.2024",
     "Strecke-Datei-Vor-Umzug": "<relativer Pfad zur Karte vor dem Umzug>",
     "Strecke-Datei-Nach-Umzug": "<relativer Pfad zur Karte nach dem Umzug>",
+    "Werbungskosten": {
+        "2025": [
+            {
+                "Kategorie": "Arbeitsmittel",
+                "Beschreibung": "Monitor und Tastatur",
+                "Betrag": "245,90"
+            },
+            {
+                "Kategorie": "Kontoführung",
+                "Hinweis": "Pauschal",
+                "Betrag": "16,00"
+            }
+        ]
+    },
     "Jahr": {
         "2025": [
             {
@@ -20,6 +34,12 @@
                 "Feiertage": "Berlin",
                 "Home-Office-Tage": "Montag",
                 "Urlaubstage": "28",
+                "Urlaubsdaten": [
+                    "14.04.2025 - 17.04.2025",
+                    "30.05.2025",
+                    "06.06.2025",
+                    "22.12.2025 - 24.12.2025"
+                ],
                 "Addresse_Zuhause": "Musterstraße 1, 10115 Berlin",
                 "Addresse_Arbeit": "Dresdner Str. 10, 10247 Berlin",
                 "Kilometer_Entfernung": "5",
