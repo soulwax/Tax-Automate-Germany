@@ -1,0 +1,31 @@
+{
+    "AppName": "Tax-Automate-Germany",
+    "Wichtig": "Diese Datei enthält persönliche Informationen. Bitte stellen Sie sicher, dass sie nicht öffentlich zugänglich ist.",
+    "TODO": "Kopieren Sie diese Datei und nennen Sie sie `metadata.json`. Füllen Sie die Felder mit Ihren persönlichen Daten und Informationen zu Ihren Arbeitstagen, Feiertagen, Home-Office-Tagen, Urlaubstagen, Adressen und Kilometerentfernungen aus. Aktualisieren Sie die Pfade zu den Kartendateien entsprechend.",
+    "Vorname": "Max",
+    "Nachname": "Mustermann",
+    "Geburtsdatum": "01.01.1990",
+    "Steuer-Identifikationsnummer": "12345678901",
+    "Finanzamt-damals": "Berlin-Mitte",
+    "Steuerklasse": "1",
+    "Addresse_Arbeitgeber_Heute": "Musterstraße 1, 10115 Berlin",
+    "Persönliches_Umzugsdatum": "01.05.2024",
+    "Umzugsdatum_Arbeitgeber": "01.01.2024",
+    "Strecke-Datei-Vor-Umzug": "<relativer Pfad zur Karte vor dem Umzug>",
+    "Strecke-Datei-Nach-Umzug": "<relativer Pfad zur Karte nach dem Umzug>",
+    "Jahr": {
+        "2025": [
+            {
+                "Arbeitstage": "Montag bis Freitag",
+                "Feiertage": "Berlin",
+                "Home-Office-Tage": "Montag",
+                "Urlaubstage": "28",
+                "Addresse_Zuhause": "Musterstraße 1, 10115 Berlin",
+                "Addresse_Arbeit": "Dresdner Str. 10, 10247 Berlin",
+                "Kilometer_Entfernung": "5",
+                "Kartendatei": "<relativer Pfad zur Karte für 2025>",
+                "Kommentar": "Die Fahrt zur Arbeit dauert ca. 15 Minuten, abhängig vom Verkehr."
+            }
+        ]
+    }
+}
